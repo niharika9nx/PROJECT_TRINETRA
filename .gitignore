@@ -1,0 +1,40 @@
+# Dependencies
+server/node_modules/
+node_modules/
+
+# Build output
+server/dist/
+dist/
+build/
+
+# Env & secrets
+server/.env
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+*.log
+
+# Model artifacts (large binaries — keep placeholders only)
+local_models/llm/*.onnx
+local_models/llm/*.bin
+local_models/llm/*.gguf
+local_models/vlm/*.onnx
+local_models/vlm/*.bin
+local_models/vlm/*.gguf
+!local_models/llm/.gitkeep
+!local_models/vlm/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+opencode/
+
+# Temp
+tmp/
+temp/
