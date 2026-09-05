@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trinetra Agent</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 380px;
+      min-height: 260px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 16px;
+    }
+    h1 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #f8fafc;
+    }
+    .subtitle {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-bottom: 12px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #cbd5e1;
+    }
+    textarea {
+      width: 100%;
+      min-height: 72px;
+      padding: 8px 10px;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: #1e293b;
+      color: #f1f5f9;
+      font-size: 13px;
+      resize: vertical;
+      outline: none;
+    }
+    textarea:focus { border-color: #38bdf8; }
+    button {
+      margin-top: 10px;
+      width: 100%;
+      padding: 9px 12px;
+      border: none;
+      border-radius: 8px;
+      background: #0ea5e9;
+      color: white;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { background: #0284c7; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #status {
+      margin-top: 12px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      font-size: 12px;
+      min-height: 44px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #cbd5e1;
+    }
+    .status-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #64748b;
+      margin-bottom: 2px;
+    }
+    .hint {
+      margin-top: 8px;
+      font-size: 10px;
+      color: #64748b;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>Trinetra Agent</h1>
+  <div class="subtitle">Privacy-preserving AI web agent — local-first</div>
+
+  <label for="goalInput">User Goal</label>
+  <textarea id="goalInput" placeholder="e.g., Find the cheapest laptop under ₹60,000 and open it."></textarea>
+
+  <button id="startBtn">Start</button>
+
+  <div id="status">
+    <div class="status-label">Status</div>
+    <span id="statusText">Idle — enter a goal and click Start.</span>
+  </div>
+  <div class="hint">Phase 1 shell — Start logs goal to console. No agent logic yet.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
