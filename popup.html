@@ -99,8 +99,13 @@
     <div class="status-label">Status</div>
     <span id="statusText">Idle — enter a goal and click Start.</span>
   </div>
-  <div class="hint">Phase 1 shell — Start logs goal to console. No agent logic yet.</div>
+  <div class="hint">Phase 12 — Start runs local→Gemini 3.5 loop (needs_vlm flagged, no real VLM yet). Use on real e-commerce page.</div>
 
+  <script src="lib/providers/model_provider_interface.js"></script>
+  <script src="lib/providers/stub_provider.js"></script>
+  <script src="lib/visual_analysis.js"></script>
+  <script src="lib/local_reasoning.js"></script>
+  <script src="lib/workflow_loop.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

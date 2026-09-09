@@ -192,8 +192,51 @@ function resolveTarget(target) {
   return null;
 }
 async function execScroll(action){ const amt=action.params?.amount??action.amount??300; const t=resolveTarget(action.target); if(t&&t.scrollBy) t.scrollBy({top:amt,behavior:'smooth'}); else window.scrollBy({top:amt,behavior:'smooth'}); await new Promise(r=>setTimeout(r,400)); return {success:true,type:'scroll',amount:amt};}
-async function execClick(action){ let el=resolveTarget(action.target); if(!el&&action.target?.value) try{el=document.querySelector(action.target.value);}catch(e){} if(!el) return {success:false,error:'click target not found'}; el.click(); await new Promise(r=>setTimeout(r,300)); return {success:true,type:'click'};}
-async function execNavigate(action){ const url=action.params?.url||action.target?.value; if(!url) return {success:false,error:'navigate missing url'}; window.location.href=url; return {success:true,type:'navigate',url};}
+async function execClick(action){
+  let el=resolveTarget(action.target);
+  if(!el&&action.target?.value) try{el=document.querySelector(action.target.value);}catch(e){}
+  if(!el) return {success:false,error:'click target not found'};
+  // CSP: block javascript: hrefs and inline javascript: handlers (other e-com sites)
+  try {
+    const href = el.getAttribute && el.getAttribute('href');
+    const onclick = el.getAttribute && el.getAttribute('onclick');
+    if ((href && href.trim().toLowerCase().startsWith('javascript:')) || (onclick && onclick.trim().toLowerCase().includes('javascript:'))) {
+      console.warn('[Trinetra] click blocked javascript: href/onclick, safe dispatch', (href||onclick||'').slice(0,60));
+      if (href && href.trim().toLowerCase().startsWith('javascript:')) el.removeAttribute('href');
+      if (onclick && onclick.toLowerCase().includes('javascript:')) el.removeAttribute('onclick');
+      // prevent navigation, just dispatch
+      const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+      // stop immediate propagation to inline handler already removed, but keep for safety
+      el.dispatchEvent(evt);
+      await new Promise(r=>setTimeout(r,300));
+      return {success:true,type:'click', via:'dispatched', blocked_javascript:true};
+    }
+  } catch(e){}
+  // Use safe click that doesn't trigger javascript: navigation via href
+  try {
+    el.click();
+  } catch(e) {
+    // fallback dispatch
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+  }
+  await new Promise(r=>setTimeout(r,300));
+  return {success:true,type:'click'};
+}
+async function execNavigate(action){
+  const url=action.params?.url||action.target?.value;
+  if(!url) return {success:false,error:'navigate missing url'};
+  if(typeof url==='string' && url.trim().toLowerCase().startsWith('javascript:')) return {success:false,error:'navigate blocked: javascript: URL violates CSP'};
+  if(typeof url==='string' && !url.startsWith('http') && !url.startsWith('/') && !url.startsWith('#')) return {success:false,error:'navigate blocked: only http(s) URLs allowed'};
+  try {
+    const bgRes = await new Promise((resolve)=>{
+      try { chrome.runtime.sendMessage({type:'TRINETRA_NAVIGATE', url}, (r)=> resolve(r)); } catch(e){ resolve(null); }
+    });
+    if(bgRes && bgRes.success) return {success:true,type:'navigate',url, via:'background'};
+    if(bgRes && bgRes.error) return {success:false,error:bgRes.error};
+  } catch(e){}
+  window.location.href=url;
+  return {success:true,type:'navigate',url, via:'content'};
+}
 async function execRead(){ let at=[]; try{ at=extractAccessibilityTree(); }catch(e){} return {success:true,type:'read',at,count:at.length};}
 async function execType(action){ const el=resolveTarget(action.target); if(!el) return {success:false,error:'type target not found'}; const text=action.params?.text??action.params?.value??''; el.focus(); if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable){ el.value=text; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); } await new Promise(r=>setTimeout(r,200)); return {success:true,type:'type'};}
 async function execSubmit(action){ let el=resolveTarget(action.target)||document.querySelector('form'); if(!el) return {success:false,error:'submit target not found'}; if(el.tagName==='FORM') el.submit(); else el.click(); await new Promise(r=>setTimeout(r,300)); return {success:true,type:'submit'};}

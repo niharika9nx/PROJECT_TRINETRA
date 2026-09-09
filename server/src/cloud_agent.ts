@@ -2,8 +2,24 @@
 // Wraps LocalModelAdapter (local models as cloud) with session context and error handling.
 // Provider-agnostic: swapping LocalModelAdapter for OpenAI/Anthropic adapter later requires only changing the import.
 
-import { callLocalModel } from './providers/local_model_adapter.js';
 import { sessionManager } from './session_manager.js';
+import { callLocalModel as callLocalStub } from './providers/local_model_adapter.js';
+import { callGeminiModel } from './providers/gemini_adapter.js';
+
+function useGemini(): boolean {
+  const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  if (!key || key === 'PASTE_YOUR_KEY_HERE') return false;
+  // Allow explicit opt-out via CLOUD_PROVIDER=local
+  if (process.env.CLOUD_PROVIDER === 'local') return false;
+  return true;
+}
+
+async function callLocalModel(input: any): Promise<any> {
+  if (useGemini()) {
+    return callGeminiModel(input);
+  }
+  return callLocalStub(input);
+}
 
 export interface CloudAgentInput {
   sanitizedScreenshot?: string;
