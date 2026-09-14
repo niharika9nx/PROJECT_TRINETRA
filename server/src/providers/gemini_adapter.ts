@@ -51,9 +51,26 @@ function getModelChain(): string[] {
   return [...new Set(chain)];
 }
 
-function truncateAT(at: any[], max = 40): any[] {
+function truncateAT(at: any[], userGoal?: string, max = 80): any[] {
   if (!Array.isArray(at)) return [];
-  return at.slice(0, max).map((n: any) => ({
+  const goalWords = (userGoal || '').toLowerCase().split(/\W+/).filter(w => w.length > 2);
+  const scored = at.map((n: any) => {
+    const nameLower = (n.name || '').toLowerCase();
+    let score = 0;
+    for (const w of goalWords) if (nameLower.includes(w)) score += 10;
+    if (/₹|rs\.?|price|\$|\d[\d,]*\s*(₹|rs)/i.test(n.name || '')) score += 5;
+    if (['button','link','textbox','combobox','searchbox'].includes(n.role)) score += 3;
+    if (n.tag === 'input' || n.tag === 'a' || n.tag === 'button') score += 2;
+    return { n, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  // Keep top scored + first 20 in DOM order for context, then dedup
+  const top = scored.slice(0, max).map(s => s.n);
+  // If still sparse, fill with first nodes
+  if (top.length < max && at.length > max) {
+    for (let i = 0; i < at.length && top.length < max; i++) if (!top.includes(at[i])) top.push(at[i]);
+  }
+  return top.slice(0, max).map((n: any) => ({
     id: n.id,
     role: n.role,
     name: (n.name || '').slice(0, 120),
@@ -65,7 +82,7 @@ function truncateAT(at: any[], max = 40): any[] {
 }
 
 function buildSystemPrompt(): string {
-  return `You are Trinetra Cloud Brain (Gemini 3.5 Flash) for a privacy-preserving web agent.
+  return `You are Trinetra Cloud Brain for a privacy-preserving web agent (any query, not just price).
 DOM is primary; screenshot is absent unless VLM flagged.
 
 Return STRICT JSON only, no markdown, matching this schema:
@@ -80,10 +97,12 @@ Return STRICT JSON only, no markdown, matching this schema:
     {"id":"string","type":"scroll|click|navigate|read|type|submit|payment","requires_approval":false,"target":{"mode":"at_node_id|bbox|css_selector","value":"string or null"},"params":{}}
   ]
 }
-Rules:
+Rules (generic for ANY userGoal):
 - Allowed auto: scroll, click, navigate, read. Restricted (requires_approval true): type/fill, submit/confirm, payment/sensitive_ops.
 - Prefer at_node_id with IDs from provided AT; fallback to css_selector if needed. bbox as [x,y,w,h] numbers if used.
-- For "cheapest laptop under ₹60k" etc: if price nodes visible, click cheapest candidate; else scroll.
+- For any query: search → click searchbox + type text; price/filter → click filter or cheapest matching price; navigation → navigate; generic → scroll/read. Choose one best action per turn.
+- For "cheapest laptop under ₹60k" etc: if price nodes visible, among all price nodes under limit click cheapest (parse numbers ignoring commas/₹/Rs); else scroll to reveal more.
+- Flipkart/Amazon both use ₹/Rs/$ price; handle both. Use name match for query keywords across any e-commerce.
 - If AT empty or sparse (<3 nodes) or task needs visual layout you cannot infer from AT, set needs_vlm:true and explain vlm_reason, but still return a best-effort action (usually read or scroll).
 - confidence 0.0-1.0 reflecting certainty. Keep reasoning concise (1-3 sentences) but specific to nodes you saw.
 - SECURITY: never use javascript: URLs — only https:// for navigate.target.value or params.url. If you would use javascript:, return read instead.
@@ -92,7 +111,7 @@ Rules:
 
 function buildUserPrompt(input: GeminiInput): string {
   const at = input.sanitizedAT || [];
-  const atTrunc = truncateAT(at, 40);
+  const atTrunc = truncateAT(at, input.userGoal, 80);
   const atSummary =
     at.length === 0
       ? 'no accessible nodes (needs_vlm likely true)'

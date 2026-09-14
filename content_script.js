@@ -3,6 +3,11 @@
 // Phase 2: AT extraction via lib/at_extractor.js logic (inlined helpers + message handler).
 // Future phases will extend this file without breaking Phase 2 API.
 
+if (typeof window !== 'undefined' && window.__TRINETRA_CONTENT_SCRIPT_LOADED) {
+  console.log('[Trinetra] content script already loaded, skipping duplicate injection');
+} else {
+if (typeof window !== 'undefined') window.__TRINETRA_CONTENT_SCRIPT_LOADED = true;
+
 // --- Helpers (duplicated from lib/at_extractor.js for MV3 content_script without import) ---
 function inferRole(el) {
   if (el.getAttribute && el.getAttribute('role')) return el.getAttribute('role');
@@ -292,3 +297,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 console.log('[Trinetra] content script loaded — AT + action executor + approval modal ready (Phase 6)');
+} // end idempotent guard
+if (typeof window !== 'undefined' && window.__TRINETRA_CONTENT_SCRIPT_LOADED && !window.__TRINETRA_CONTENT_SCRIPT_LISTENER) {
+  window.__TRINETRA_CONTENT_SCRIPT_LISTENER = true;
+}
