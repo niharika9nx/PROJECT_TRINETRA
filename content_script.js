@@ -893,6 +893,9 @@ function _trStepLabel(step) {
     reason: 'Understanding request', reasoned: 'Request understood',
     sanitize: 'Sanitizing context', sanitized: 'Context sanitized',
     cloud_call: 'Consulting cloud agent', cloud_result: 'Cloud response received',
+    cloud_error: 'Cloud error — falling back',
+    local_fallback: 'Using local fallback actions',
+    auth_required: 'Login required — cannot proceed',
     execute: 'Executing action', executed: 'Action executed',
     evaluate: 'Evaluating progress', vlm_flag: 'VLM analysis flagged',
     error: 'Error occurred'

@@ -197,6 +197,8 @@ document.addEventListener('DOMContentLoaded', () => {
     'evaluate': { title: 'Evaluating progress', subtitle: (s) => s.achieved ? 'Goal achieved!' : 'Continuing analysis', icon: '◌', badge: 'pending' },
     'vlm_flag': { title: 'Visual analysis needed', subtitle: 'Flagged for visual fallback processing', icon: '📷', badge: 'active' },
     'cloud_error': { title: 'Cloud error', subtitle: (s) => s.error || 'Cloud service unavailable', icon: '⚠', badge: 'pending' },
+    'local_fallback': { title: 'Falling back to local', subtitle: (s) => `Cloud failed: ${s.reason || 'unavailable'} — using local actions`, icon: '⚡', badge: 'active' },
+    'auth_required': { title: 'Login required', subtitle: (s) => s.reason || 'Page requires authentication — cannot proceed', icon: '🔒', badge: 'pending' },
     'execute_error': { title: 'Execution error', subtitle: (s) => s.error || 'Action failed', icon: '⚠', badge: 'pending' },
     'no_actions': { title: 'No actions needed', subtitle: 'Current state requires no further action', icon: '○', badge: 'pending' },
     'would_escalate': { title: 'Escalating to cloud', subtitle: 'Confidence below threshold — routing to cloud', icon: '☁', badge: 'cloud' }
