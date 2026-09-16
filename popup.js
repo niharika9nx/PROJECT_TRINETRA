@@ -100,7 +100,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (stub && stub.StubLLMProvider) {
       return async ({ at, userGoal, screenshot, threshold }) => {
         const c = await stub.StubLLMProvider.plan({ at, userGoal });
-        return { ...c, needs_escalation: c.confidence < (threshold ?? 0.7), actions: c.actions, plan: c.plan, threshold };
+        return { ...c, needs_escalation: c.confidence < (threshold ?? 2), actions: c.actions, plan: c.plan, threshold };
       };
     }
     throw new Error('No reasoning provider available');
@@ -194,7 +194,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'cloud_result': { title: 'Cloud response received', subtitle: 'Action plan returned from cloud', icon: '✓', badge: 'done' },
     'execute': { title: 'Executing action', subtitle: (s) => (s.actions||[]).map(a=>a.type).join(', ') || 'Running plan', icon: '⚡', badge: 'active' },
     'executed': { title: 'Action executed', subtitle: 'Step completed successfully', icon: '✓', badge: 'done' },
-    'evaluate': { title: 'Evaluating progress', subtitle: (s) => s.achieved ? 'Goal achieved!' : 'Continuing analysis', icon: s.achieved ? '✓' : '◌', badge: s.achieved ? 'done' : 'pending' },
+    'evaluate': { title: 'Evaluating progress', subtitle: (s) => s.achieved ? 'Goal achieved!' : 'Continuing analysis', icon: '◌', badge: 'pending' },
     'vlm_flag': { title: 'Visual analysis needed', subtitle: 'Flagged for visual fallback processing', icon: '📷', badge: 'active' },
     'cloud_error': { title: 'Cloud error', subtitle: (s) => s.error || 'Cloud service unavailable', icon: '⚠', badge: 'pending' },
     'execute_error': { title: 'Execution error', subtitle: (s) => s.error || 'Action failed', icon: '⚠', badge: 'pending' },
@@ -609,7 +609,10 @@ document.addEventListener('DOMContentLoaded', () => {
         serverUrl: 'http://localhost:3001/api/agent/act',
         onStep,
         maxIterations: 6,
-        threshold: 0.7,
+        threshold: 2,
+        reloadPageFn: async () => {
+          try { await bgSend({ type: 'TRINETRA_RELOAD_TAB' }); } catch (e) {}
+        },
       });
       console.log('[Trinetra] Loop result', result);
       let finalText = '';

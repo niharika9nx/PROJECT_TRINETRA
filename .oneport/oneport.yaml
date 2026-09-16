@@ -1,0 +1,19 @@
+# Oneport pre-ship gate config. Docs: https://oneport.dev
+# Which gates run on `op ship`. Omit `gates:` to use sensible defaults;
+# or keep defaults and tweak with `enable:` / `disable:`.
+
+# gates:
+#   - secrets
+#   - depcheck
+#   - migrate
+#   - review
+#   - apidiff
+#   - testgap
+
+# enable:            # turn on opt-in gates
+#   - costwatch
+# disable:           # turn off default gates
+#   - testgap
+
+fail_on: error       # verdict blocks on this severity or higher
+target: "."

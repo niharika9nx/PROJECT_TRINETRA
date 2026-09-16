@@ -23,6 +23,16 @@ function isValidScreenshotDataUrl(dataUrl) {
   return typeof dataUrl === 'string' && /^data:image\/(png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/.test(dataUrl);
 }
 
+// --- Icon click → toggle content script panel ---
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab || !tab.id) return;
+  chrome.tabs.sendMessage(tab.id, { type: 'TRINETRA_TOGGLE_PANEL' }).catch(() => {
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] }).then(() => {
+      setTimeout(() => chrome.tabs.sendMessage(tab.id, { type: 'TRINETRA_TOGGLE_PANEL' }), 300);
+    });
+  });
+});
+
 // --- Message router ---
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
@@ -168,6 +178,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Ping
   if (message.type === 'TRINETRA_BG_PING') {
     sendResponse({ success: true, message: 'Trinetra background ready', version: '0.1.0' });
+    return true;
+  }
+
+  // Auto-reload tab after stalled iterations (get fresh AT)
+  if (message.type === 'TRINETRA_RELOAD_TAB') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || !tabs[0]) {
+        sendResponse({ success: false, error: 'No active tab to reload' });
+        return;
+      }
+      chrome.tabs.reload(tabs[0].id, () => {
+        if (chrome.runtime.lastError) sendResponse({ success: false, error: chrome.runtime.lastError.message });
+        else sendResponse({ success: true });
+      });
+    });
     return true;
   }
 });
