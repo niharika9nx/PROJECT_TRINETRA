@@ -63,11 +63,41 @@ export async function callLocalModel(input: LocalModelInput): Promise<LocalModel
       reasoning = `Saw ${atSummary} but no price node visible. Scrolling to reveal more products.`;
       confidence = 0.84;
     }
-  } else if (goal.includes('search') || goal.includes('find')) {
-    const searchNode = at.find((n: any) => /search/i.test(n.name || '') || n.role === 'searchbox' || n.tag === 'input');
-    if (searchNode) {
-      actions = [{ id: generateId(), type: 'click', requires_approval: false, target: { mode: 'at_node_id', value: searchNode.id }, params: {} }];
-      reasoning = `Located search box "${(searchNode.name || searchNode.id)}" in ${atSummary}. Clicking to focus.`;
+  } else if (/search|find|fetch|get|show|want|need|recommend|suggest|buy|purchase|order|keychain|under|below|browse|look/i.test(goal)) {
+    // Shopping/search intent — find search box and type the query
+    const searchNode = at.find((n: any) =>
+      /search/i.test(n.name || '') || n.role === 'searchbox' || n.role === 'combobox' || n.tag === 'input'
+    );
+
+    // Extract meaningful search term from goal (exclude numbers/prices/stopwords)
+    const productWords = goal.split(/\W+/).filter((w: string) =>
+      w.length > 2 &&
+      !/^\d+$/.test(w) &&
+      !['the','and','for','with','under','below','above','over','good','best','fetch','get','show','find','search','want','need','give','please','can','you','look','browse','from','into','rs','inr','rupees','bucks'].includes(w)
+    );
+    const searchText = productWords.join(' ') || goal;
+
+    // If matching product links are already visible on screen (results page), click top product
+    const matchingProducts = at.filter((n: any) =>
+      productWords.some((pw: string) => (n.name || '').toLowerCase().includes(pw)) &&
+      (['link', 'button'].includes(n.role) || n.tag === 'a' || /keychain|item|product/i.test(n.name || ''))
+    );
+
+    if (matchingProducts.length > 0 && at.length > 5) {
+      const targetProduct = matchingProducts[0];
+      actions = [
+        { id: generateId(), type: 'scroll', requires_approval: false, target: { mode: 'at_node_id', value: targetProduct.id }, params: { amount: 200 } },
+        { id: generateId(), type: 'click', requires_approval: false, target: { mode: 'at_node_id', value: targetProduct.id }, params: {} },
+      ];
+      reasoning = `Observed search results on page with ${matchingProducts.length} matching items. Clicking top match "${(targetProduct.name || targetProduct.id).slice(0, 50)}".`;
+      confidence = 0.92;
+    } else if (searchNode) {
+      actions = [
+        { id: generateId(), type: 'click', requires_approval: false, target: { mode: 'at_node_id', value: searchNode.id }, params: {} },
+        { id: generateId(), type: 'type', requires_approval: false, target: { mode: 'at_node_id', value: searchNode.id }, params: { text: searchText } },
+        { id: generateId(), type: 'submit', requires_approval: false, target: { mode: 'at_node_id', value: searchNode.id }, params: {} },
+      ];
+      reasoning = `Located search box "${(searchNode.name || searchNode.id)}" in ${atSummary}. Typing "${searchText}" and submitting to search.`;
     } else {
       actions = [{ id: generateId(), type: 'scroll', requires_approval: false, target: null, params: { amount: 400 } }];
       reasoning = `No search box in ${atSummary}. Scrolling to locate it.`;

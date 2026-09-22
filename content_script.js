@@ -194,6 +194,39 @@ function resolveTarget(target) {
     let bbox = value; if (typeof value==='string') bbox = value.split(',').map(Number);
     if (Array.isArray(bbox) && bbox.length>=4) return document.elementFromPoint(bbox[0]+bbox[2]/2, bbox[1]+bbox[3]/2);
   }
+  if (mode === 'semantic') {
+    // Resolve semantic target by role/name matching across websites
+    const desc = (value||'').toLowerCase();
+    // Search boxes (Amazon, Flipkart, Google, generic e-commerce)
+    if (desc.includes('search')) {
+      return document.querySelector('#twotabsearchtextbox') ||
+        document.querySelector('input[name="field-keywords"]') ||
+        document.querySelector('[role="searchbox"], [role="combobox"]') ||
+        document.querySelector('input[name*="search"], input[name*="q"], input[class*="search"]') ||
+        document.querySelector('input[type="search"]');
+    }
+    // Submit buttons (Amazon search submit, etc.)
+    if (desc.includes('submit') || desc.includes('button') || desc.includes('go')) {
+      return document.querySelector('#nav-search-submit-button') ||
+        document.querySelector('input[id*="search-submit"], button[id*="search-submit"]') ||
+        document.querySelector('button, [role="button"]') ||
+        document.querySelector('input[type="submit"]');
+    }
+    // Price elements
+    if (desc.includes('price') || /price|₹|rs|\d{2,}/i.test(desc)) {
+      return document.querySelector('[class*="price"], [class*="Price"]') ||
+        document.querySelector('.a-price-whole, .a-price') ||
+        (document.querySelector('span, div, p') && Array.from(document.querySelectorAll('*')).find(el => /₹|rs\.?|price|\d{2,}/i.test(el.textContent||'')));
+    }
+    // Add to cart
+    if (desc.includes('cart') || desc.includes('add') || desc.includes('buy')) {
+      return document.querySelector('#add-to-cart-button, #buy-now-button') ||
+        document.querySelector('button, [role="button"]') ||
+        document.querySelector('[class*="cart"], [class*="add"]');
+    }
+    // Generic: match by name attribute
+    return document.querySelector(`[name*="${CSS.escape(desc)}"], [aria-label*="${CSS.escape(desc)}"]`);
+  }
   return null;
 }
 async function execScroll(action){ const amt=action.params?.amount??action.amount??300; const t=resolveTarget(action.target); if(t&&t.scrollBy) t.scrollBy({top:amt,behavior:'smooth'}); else window.scrollBy({top:amt,behavior:'smooth'}); await new Promise(r=>setTimeout(r,400)); return {success:true,type:'scroll',amount:amt};}
@@ -211,17 +244,14 @@ async function execClick(action){
       if (onclick && onclick.toLowerCase().includes('javascript:')) el.removeAttribute('onclick');
       // prevent navigation, just dispatch
       const evt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-      // stop immediate propagation to inline handler already removed, but keep for safety
       el.dispatchEvent(evt);
       await new Promise(r=>setTimeout(r,300));
       return {success:true,type:'click', via:'dispatched', blocked_javascript:true};
     }
   } catch(e){}
-  // Use safe click that doesn't trigger javascript: navigation via href
   try {
     el.click();
   } catch(e) {
-    // fallback dispatch
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
   }
   await new Promise(r=>setTimeout(r,300));
@@ -243,26 +273,75 @@ async function execNavigate(action){
   return {success:true,type:'navigate',url, via:'content'};
 }
 async function execRead(){ let at=[]; try{ at=extractAccessibilityTree(); }catch(e){} return {success:true,type:'read',at,count:at.length};}
-async function execType(action){ const el=resolveTarget(action.target); if(!el) return {success:false,error:'type target not found'}; const text=action.params?.text??action.params?.value??''; el.focus(); if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable){ el.value=text; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); } await new Promise(r=>setTimeout(r,200)); return {success:true,type:'type'};}
-async function execSubmit(action){ let el=resolveTarget(action.target)||document.querySelector('form'); if(!el) return {success:false,error:'submit target not found'}; if(el.tagName==='FORM') el.submit(); else el.click(); await new Promise(r=>setTimeout(r,300)); return {success:true,type:'submit'};}
-async function executeAction(action){
+async function execType(action, at){
+  const el=at ? resolveTarget(action.target, at) : resolveTarget(action.target);
+  if(!el) return {success:false,error:'type target not found'};
+  const text=action.params?.text??action.params?.value??'';
+  el.focus();
+  try {
+    const proto = Object.getPrototypeOf(el);
+    const valueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set ||
+                        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (valueSetter) {
+      valueSetter.call(el, text);
+    } else {
+      el.value = text;
+    }
+  } catch (e) {
+    el.value = text;
+  }
+  el.dispatchEvent(new Event('input',{bubbles:true}));
+  el.dispatchEvent(new Event('change',{bubbles:true}));
+  await new Promise(r=>setTimeout(r,200));
+  return {success:true,type:'type'};
+}
+
+async function execSubmit(action, at){
+  let el=at ? resolveTarget(action.target, at) : resolveTarget(action.target);
+  if(!el) {
+    el = document.querySelector('#nav-search-submit-button, input[id*="search-submit"], input[type="submit"]') ||
+         document.querySelector('form');
+  }
+  if(!el) return {success:false,error:'submit target not found'};
+  if(el.tagName==='FORM') {
+    el.submit();
+  } else if (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'search')) {
+    // If target is the input itself, dispatch Enter key + click submit button
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    const form = el.closest('form');
+    const submitBtn = form?.querySelector('#nav-search-submit-button, input[type="submit"], button[type="submit"]');
+    if (submitBtn) submitBtn.click();
+    else if (form) form.submit();
+  } else {
+    el.click();
+  }
+  await new Promise(r=>setTimeout(r,300));
+  return {success:true,type:'submit'};
+}
+
+async function executeAction(action, at){
   const type=(action.type||'').toLowerCase();
-  const needsApproval = action.requires_approval===true || isRestricted(type);
+  const isSearchAction = (action.target?.value && /search/i.test(action.target.value)) ||
+                         (action.params?.text && !/password|card|cvv|otp/i.test(action.params.text));
+  const isSensitive = ['payment', 'payments', 'sensitive_ops'].includes(type) ||
+                      (action.params && /password|credit|card|cvv|otp|pin|ssn/i.test(JSON.stringify(action.params)));
+  const needsApproval = action.requires_approval === true ? !isSearchAction : isSensitive;
   if(needsApproval){ const approved=await showApprovalModal(action); if(!approved) return {success:false,denied:true,reason:'User denied approval'}; }
   switch(type){
     case 'scroll': return execScroll(action);
-    case 'click': return execClick(action);
+    case 'click': return execClick(action, at);
     case 'navigate': return execNavigate(action);
     case 'read': case 'observe': return execRead(action);
-    case 'type': case 'fill': return execType(action);
-    case 'submit': case 'confirm': case 'payment': case 'payments': case 'sensitive_ops': return execSubmit(action);
+    case 'type': case 'fill': return execType(action, at);
+    case 'submit': case 'confirm': case 'payment': case 'payments': case 'sensitive_ops': return execSubmit(action, at);
     default: return {success:false,error:`Unknown action type: ${type}`};
   }
 }
-async function executePlan(plan){
+async function executePlan(plan, at){
   const actions=plan.actions||plan.plan||[];
   const results=[];
-  for(const a of actions){ const r=await executeAction(a); results.push({action:a,result:r}); if(r.denied) return {success:false,denied:true,results}; await new Promise(x=>setTimeout(x,200)); }
+  for(const a of actions){ const r=await executeAction(a, at); results.push({action:a,result:r}); if(r.denied) return {success:false,denied:true,results}; await new Promise(x=>setTimeout(x,200)); }
   return {success:true,results};
 }
 
@@ -286,7 +365,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'TRINETRA_EXECUTE_PLAN') {
-    executePlan(message.plan || {}).then(r => sendResponse({ success: r.success, result: r })).catch(e => sendResponse({ success: false, error: e.message }));
+    const at = message.at || [];
+    executePlan(message.plan || {}, at).then(r => sendResponse({ success: r.success, result: r })).catch(e => sendResponse({ success: false, error: e.message }));
     return true;
   }
 
@@ -1053,8 +1133,13 @@ async function _trGetScreenshot() {
   } catch (e) { return null; }
 }
 
-async function _trExecPlan({ actions }) {
-  const res = await _trBgSend({ type: 'TRINETRA_EXECUTE_PLAN_BG', plan: { actions } });
+async function _trExecPlan({ actions, plan, at }) {
+  const acts = actions || plan || [];
+  try {
+    const r = await executePlan({ actions: acts }, at || []);
+    if (r && r.success) return r;
+  } catch (e) {}
+  const res = await _trBgSend({ type: 'TRINETRA_EXECUTE_PLAN_BG', plan: { actions: acts }, at: at || [] });
   if (!res || !res.success) throw new Error(res?.error || 'execute failed');
   return res.result;
 }
@@ -1129,7 +1214,7 @@ async function _trHandleSend() {
       sanitizeFn: _trSanitize,
       serverUrl: 'http://localhost:3001/api/agent/act',
       onStep,
-      maxIterations: 6,
+      maxIterations: 10,
       threshold: 2,
       reloadPageFn: async () => { try { await _trBgSend({ type: 'TRINETRA_RELOAD_TAB' }); } catch (e) {} },
     });
@@ -1138,7 +1223,14 @@ async function _trHandleSend() {
     _trHideConfidence();
     if (result.success) {
       _trSetState('completed');
-      finalText = 'Task completed after ' + result.iteration + ' iteration' + (result.iteration > 1 ? 's' : '') + '.\n\n' + result.reason;
+      const lastReasoning = result.cloudResult?.explanation ||
+                            result.cloudResult?.reasoning ||
+                            result.history?.slice(-1)[0]?.reasoning?.explanation ||
+                            result.history?.slice(-1)[0]?.reasoning?.reasoning ||
+                            '';
+      finalText = 'Task completed after ' + result.iteration + ' iteration' + (result.iteration > 1 ? 's' : '') + '.\n\n' +
+                  (lastReasoning ? lastReasoning + '\n\n' : '') +
+                  'Status: ' + result.reason;
     } else {
       _trSetState('error');
       finalText = 'Stopped after ' + result.iteration + ' iteration' + (result.iteration > 1 ? 's' : '') + ': ' + result.reason;

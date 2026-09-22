@@ -10,7 +10,7 @@ import { sessionManager } from './session_manager.js';
 import { orchestrate } from './cloud_agent.js';
 
 const app = express();
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -23,6 +23,16 @@ const AgentActSchema = z.object({
   sessionId: z.string().min(1).default('default-session'),
   userGoal: z.string().optional().refine((v) => !v || !v.toLowerCase().includes('javascript:'), { message: 'javascript: in userGoal blocked' }),
   timestamp: z.string().optional(),
+  atDiff: z.object({
+    nodeCountDelta: z.number(),
+    newNodesCount: z.number(),
+    stateChangesCount: z.number(),
+    pageChanged: z.boolean(),
+    nodeCount: z.number(),
+  }).optional(),
+  classification: z.string().optional(),
+  iteration: z.number().optional(),
+  noChangeCount: z.number().optional(),
 });
 
 app.get('/health', (_req, res) => {
@@ -56,7 +66,7 @@ app.post('/api/agent/act', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid request', details: parsed.error.flatten() });
   }
 
-  const { sanitizedScreenshot, sanitizedAT, sanitized_at, sessionId, userGoal } = parsed.data;
+  const { sanitizedScreenshot, sanitizedAT, sanitized_at, sessionId, userGoal, atDiff, classification, iteration, noChangeCount } = parsed.data;
   const at = sanitizedAT || sanitized_at || [];
 
   const result = await orchestrate({
@@ -64,6 +74,10 @@ app.post('/api/agent/act', async (req, res) => {
     sanitizedAT: Array.isArray(at) ? at : [],
     sessionId,
     userGoal,
+    atDiff,
+    classification,
+    iteration,
+    noChangeCount,
   });
 
   if (!result.success) {

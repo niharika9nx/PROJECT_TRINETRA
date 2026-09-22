@@ -9,6 +9,16 @@ export interface GeminiInput {
   userGoal?: string;
   sessionId?: string;
   historyLength?: number;
+  atDiff?: {
+    nodeCountDelta: number;
+    newNodesCount: number;
+    stateChangesCount: number;
+    pageChanged: boolean;
+    nodeCount: number;
+  };
+  classification?: string;
+  iteration?: number;
+  noChangeCount?: number;
 }
 
 export interface GeminiOutput {
@@ -37,11 +47,11 @@ function getConfig() {
   // Allow GOOGLE_API_KEY alias per .env.example history
   const fallbackKey = process.env.GOOGLE_API_KEY || '';
   const key = apiKey || fallbackKey;
-  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-  const timeoutMs = process.env.GEMINI_TIMEOUT_MS ? Number(process.env.GEMINI_TIMEOUT_MS) : 20000;
-  const fallbackModelsRaw = process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-lite-latest,gemini-3.5-flash-lite,gemini-flash-latest';
+  const model = process.env.GEMINI_MODEL || 'gemini-3-flash-preview';
+  const timeoutMs = process.env.GEMINI_TIMEOUT_MS ? Number(process.env.GEMINI_TIMEOUT_MS) : 15000;
+  const fallbackModelsRaw = process.env.GEMINI_FALLBACK_MODELS || 'gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview';
   const fallbackModels = fallbackModelsRaw.split(',').map(s => s.trim()).filter(Boolean);
-  return { key, model, timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 20000, fallbackModels };
+  return { key, model, timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 15000, fallbackModels };
 }
 
 function getModelChain(): string[] {
@@ -59,6 +69,7 @@ function truncateAT(at: any[], userGoal?: string, max = 80): any[] {
     let score = 0;
     for (const w of goalWords) if (nameLower.includes(w)) score += 10;
     if (/₹|rs\.?|price|\$|\d[\d,]*\s*(₹|rs)/i.test(n.name || '')) score += 5;
+    if (/search|query|find/i.test(n.name || '') || /search/i.test(n.id || '') || n.role === 'searchbox') score += 12;
     if (['button','link','textbox','combobox','searchbox'].includes(n.role)) score += 3;
     if (n.tag === 'input' || n.tag === 'a' || n.tag === 'button') score += 2;
     return { n, score };
@@ -70,58 +81,93 @@ function truncateAT(at: any[], userGoal?: string, max = 80): any[] {
   if (top.length < max && at.length > max) {
     for (let i = 0; i < at.length && top.length < max; i++) if (!top.includes(at[i])) top.push(at[i]);
   }
-  return top.slice(0, max).map((n: any) => ({
-    id: n.id,
-    role: n.role,
-    name: (n.name || '').slice(0, 120),
-    tag: n.tag,
-    bounds: n.bounds,
-    state: n.state,
-    selector: n.selector,
-  }));
+  return top;
 }
 
-function buildSystemPrompt(): string {
-  return `You are Trinetra Cloud Brain for a privacy-preserving web agent (any query, not just price).
-DOM is primary; screenshot is absent unless VLM flagged.
 
-Return STRICT JSON only, no markdown, matching this schema:
+// System prompt defining agent behavior and schema
+export function buildSystemPrompt(): string {
+  return `You are Trinetra — an intelligent autonomous web agent that achieves user goals by reasoning about live screen state from the DOM Accessibility Tree (AT).
+
+THINKING PIPELINE (follow this for every turn):
+1. CLASSIFY: What type of task is this? (search, navigate, action, info, auth_gated)
+2. OBSERVE: What does the DOM Accessibility Tree (AT) show right now?
+   - Is there a search box on screen? (e.g. role="searchbox", tag="input", name="Search Amazon", id="twotabsearchtextbox")
+   - Are search results with product titles and prices displayed?
+   - What elements are visible?
+3. DECIDE: What concrete action(s) will make progress toward the user's goal?
+   - If on an e-commerce home/landing page and user wants an item:
+     -> Action 1: "type" into searchbox with the concise search keywords (e.g. "gojo satoru keychain"). Set requires_approval: false.
+     -> Action 2: "submit" the searchbox or click the search submit button. Set requires_approval: false.
+   - If on search results page:
+     -> Examine product titles and prices (e.g. "₹299", "₹450"). Check if any match the user's constraints (e.g. under 500).
+     -> Click the best matching product, or scroll down if more results need to be loaded.
+4. VERIFY: Based on AT-diff (what changed since last turn), did my action work? Is the goal achieved?
+
+Return STRICT JSON only, matching this schema:
 {
   "version": "1.0",
   "source": "cloud",
   "confidence": 0.0-1.0,
-  "reasoning": "string — explain what you see and why you chose actions; mention needs_vlm if AT insufficient",
+  "reasoning": "string — clear reasoning: what was seen on screen, what action is taken, and why",
   "needs_vlm": boolean,
   "vlm_reason": "string if needs_vlm true",
   "actions": [
-    {"id":"string","type":"scroll|click|navigate|read|type|submit|payment","requires_approval":false,"target":{"mode":"at_node_id|bbox|css_selector","value":"string or null"},"params":{}}
+    {
+      "id": "act-1",
+      "type": "scroll|click|navigate|read|type|submit|payment",
+      "requires_approval": boolean,
+      "target": { "mode": "at_node_id|semantic|css_selector", "value": "string or null" },
+      "params": {}
+    }
   ]
 }
-Rules (generic for ANY userGoal):
-- Allowed auto: scroll, click, navigate, read. Restricted (requires_approval true): type/fill, submit/confirm, payment/sensitive_ops.
-- Prefer at_node_id with IDs from provided AT; fallback to css_selector if needed. bbox as [x,y,w,h] numbers if used.
-- For any query: search → click searchbox + type text; price/filter → click filter or cheapest matching price; navigation → navigate; generic → scroll/read. Choose one best action per turn.
-- For "cheapest laptop under ₹60k" etc: if price nodes visible, among all price nodes under limit click cheapest (parse numbers ignoring commas/₹/Rs); else scroll to reveal more.
-- Flipkart/Amazon both use ₹/Rs/$ price; handle both. Use name match for query keywords across any e-commerce.
-- If AT empty or sparse (<3 nodes) or task needs visual layout you cannot infer from AT, set needs_vlm:true and explain vlm_reason, but still return a best-effort action (usually read or scroll).
-- confidence 0.0-1.0 reflecting certainty. Keep reasoning concise (1-3 sentences) but specific to nodes you saw.
-- SECURITY: never use javascript: URLs — only https:// for navigate.target.value or params.url. If you would use javascript:, return read instead.
-- Return valid JSON only.`;
+
+CRITICAL RULES:
+- For search queries on public search boxes: set requires_approval: false so the search executes smoothly without interruption.
+- For sensitive operations ONLY (passwords, credit cards, payment checkout, personal addresses): set requires_approval: true.
+- Extract concise, effective search keywords from userGoal (e.g., from "fetch me a good gojo satoru keychain under 500", search for "gojo satoru keychain").
+- If the AT contains a searchbox node (role="searchbox", id="twotabsearchtextbox", or name containing "search"): target it using mode "at_node_id" with its id, or mode "semantic" with value "search".
+- Never use javascript: URLs.
+- Always output valid JSON only.`;
 }
 
-function buildUserPrompt(input: GeminiInput): string {
+
+export function buildUserPrompt(input: GeminiInput): string {
   const at = input.sanitizedAT || [];
   const atTrunc = truncateAT(at, input.userGoal, 80);
   const atSummary =
     at.length === 0
       ? 'no accessible nodes (needs_vlm likely true)'
       : `${at.length} nodes (showing ${atTrunc.length}), e.g. ${atTrunc.slice(0, 3).map((n: any) => `${n.role}:${(n.name || '').slice(0, 40)}`).join(' | ')}`;
+
+  let diffContext = '';
+  if (input.atDiff) {
+    const d = input.atDiff;
+    diffContext = `\nAT-Diff (what changed since last turn):
+  - pageChanged: ${d.pageChanged}
+  - newNodes: ${d.newNodesCount} new elements appeared
+  - stateChanges: ${d.stateChangesCount} elements changed state
+  - nodeCountDelta: ${d.nodeCountDelta > 0 ? '+' : ''}${d.nodeCountDelta} (was ${d.nodeCount - d.nodeCountDelta}, now ${d.nodeCount})
+  - noChangeCount: ${input.noChangeCount || 0} turns with no change`;
+  } else {
+    diffContext = '\nAT-Diff: First iteration — no previous AT to compare.';
+  }
+
+  let classContext = '';
+  if (input.classification) {
+    classContext = `\nTask classification: ${input.classification}`;
+  }
+  if (input.iteration) {
+    classContext += `\nIteration: ${input.iteration}`;
+  }
+
   return `UserGoal: ${input.userGoal || '(none)'}
-Session: ${input.sessionId || 'unknown'} historyTurns: ${input.historyLength ?? 0}
+Session: ${input.sessionId || 'unknown'} historyTurns: ${input.historyLength ?? 0}${classContext}${diffContext}
 Sanitized AT summary: ${atSummary}
 Full truncated AT JSON:
 ${JSON.stringify(atTrunc, null, 2)}
-Instructions: Return Action Plan JSON per system prompt. No extra text.`;
+Instructions: Think through CLASSIFY → OBSERVE → DECIDE → VERIFY. Return Action Plan JSON per system prompt. No extra text.`;
 }
 
 function tryParseJson(text: string): any | null {
@@ -131,7 +177,16 @@ function tryParseJson(text: string): any | null {
   try {
     return JSON.parse(t);
   } catch {}
-  // Extract first {...} block
+
+  // Extract from markdown ```json ... ``` code fence
+  const codeBlockMatch = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (codeBlockMatch && codeBlockMatch[1]) {
+    try {
+      return JSON.parse(codeBlockMatch[1].trim());
+    } catch {}
+  }
+
+  // Extract outermost {...} block
   const start = t.indexOf('{');
   const end = t.lastIndexOf('}');
   if (start !== -1 && end !== -1 && end > start) {
@@ -140,6 +195,7 @@ function tryParseJson(text: string): any | null {
       return JSON.parse(slice);
     } catch {}
   }
+
   // Strip markdown fences
   const fenced = t.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
   try {
@@ -168,10 +224,17 @@ function normalizeOutput(parsed: any, fallbackAt: any[]): GeminiOutput {
       target = null;
       return { id: a.id || generateId(), type: 'read', requires_approval: false, target: null, params: {} };
     }
+    const typeStr = String(a.type || 'read').toLowerCase();
+    const isSearchAction = (target && typeof target.value === 'string' && /search/i.test(target.value)) ||
+                           (params && typeof params.text === 'string' && !/password|card|cvv|otp/i.test(params.text));
+    const isSensitive = ['payment', 'payments', 'sensitive_ops'].includes(typeStr) ||
+                        (params && /password|credit|card|cvv|otp|pin|ssn/i.test(JSON.stringify(params)));
+    const reqApproval = a.requires_approval === true ? !isSearchAction : isSensitive;
+
     return {
       id: a.id || generateId(),
-      type: String(a.type || 'read').toLowerCase(),
-      requires_approval: a.requires_approval === true || ['type', 'fill', 'submit', 'confirm', 'payment', 'payments', 'sensitive_ops'].includes(String(a.type || '').toLowerCase()),
+      type: typeStr,
+      requires_approval: reqApproval,
       target,
       params,
     };
@@ -234,7 +297,6 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
       generationConfig: {
         temperature: 0.2,
         maxOutputTokens: 2048,
-        responseMimeType: 'application/json',
       },
     };
 
@@ -256,8 +318,23 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
         if (res.status === 400) throw new Error(`Gemini 400 bad request (${model}): ${text.slice(0, 600)}`);
         if (res.status === 401 || res.status === 403) throw new Error(`Gemini auth error ${res.status} (${model}): check GEMINI_API_KEY — ${text.slice(0, 400)}`);
         if (res.status === 429) throw new Error(`Gemini rate limited 429 (${model}): ${text.slice(0, 400)}`);
-        if (res.status === 503) throw new Error(`Gemini 503 unavailable (${model}): ${text.slice(0, 400)}`);
-        throw new Error(`Gemini ${res.status} (${model}): ${text.slice(0, 600)}`);
+        if (res.status === 503) {
+          // Retry once after 1s for temporary demand spike
+          await new Promise(r => setTimeout(r, 1000));
+          try {
+            res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(attemptBody),
+              signal: controller.signal,
+            });
+          } catch {}
+          if (!res.ok) {
+            const retryText = await res.text().catch(() => '');
+            throw new Error(`Gemini 503 unavailable (${model}): ${retryText.slice(0, 400)}`);
+          }
+        }
+        if (!res.ok) throw new Error(`Gemini ${res.status} (${model}): ${text.slice(0, 600)}`);
       }
       return res.json().catch(() => null);
     }
@@ -373,36 +450,8 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
     return normalizeOutput(parsed, input.sanitizedAT || []);
   } // end for chain
 
-  // All Gemini models failed (429/503/timeout) — final fallback to local stub logic (never 500 for demo)
-  console.warn(`[Gemini] All models in chain failed, lastError: ${lastError?.message?.slice(0,200)}, falling back to local stub`);
-  const at = input.sanitizedAT || [];
-  const priceNode = at.find((n: any) => /₹|rs\.?|price|\d{3,}/i.test(n.name || ''));
-  if (priceNode) {
-    return normalizeOutput(
-      {
-        version: '1.0',
-        source: 'cloud',
-        confidence: 0.65,
-        reasoning: `Fallback stub (all Gemini 429): found price node "${(priceNode.name || '').slice(0,50)}" — clicking cheapest candidate. Original error: ${lastError?.message?.slice(0,100)}`,
-        needs_vlm: at.length < 3,
-        vlm_reason: at.length < 3 ? 'AT sparse — VLM flagged in fallback' : '',
-        actions: [{ id: generateId(), type: 'click', requires_approval: false, target: { mode: 'at_node_id', value: priceNode.id }, params: {} }],
-      },
-      at
-    );
-  }
-  return normalizeOutput(
-    {
-      version: '1.0',
-      source: 'cloud',
-      confidence: 0.6,
-      reasoning: `Fallback stub (all Gemini 429): no price node visible, scrolling. Original error: ${lastError?.message?.slice(0,100)}`,
-      needs_vlm: at.length < 3,
-      vlm_reason: at.length < 3 ? 'AT sparse' : '',
-      actions: [{ id: generateId(), type: 'scroll', requires_approval: false, target: null, params: { amount: 600 } }],
-    },
-    at
-  );
+  // All Gemini models failed (429/503/timeout) — throw so cloud_agent.ts can fall back to smart local_model_adapter
+  throw new Error(`All Gemini models failed (429/503/timeout). Last error: ${lastError?.message?.slice(0,300)}`);
 }
 
 // Compat alias so cloud_agent can import either name

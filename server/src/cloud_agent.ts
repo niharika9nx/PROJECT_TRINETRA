@@ -16,7 +16,12 @@ function useGemini(): boolean {
 
 async function callLocalModel(input: any): Promise<any> {
   if (useGemini()) {
-    return callGeminiModel(input);
+    try {
+      return await callGeminiModel(input);
+    } catch (err: any) {
+      console.warn(`[CloudAgent] Gemini chain failed (${err.message}). Falling back to local model adapter.`);
+      return callLocalStub(input);
+    }
   }
   return callLocalStub(input);
 }
@@ -26,10 +31,20 @@ export interface CloudAgentInput {
   sanitizedAT?: any[];
   sessionId: string;
   userGoal?: string;
+  atDiff?: {
+    nodeCountDelta: number;
+    newNodesCount: number;
+    stateChangesCount: number;
+    pageChanged: boolean;
+    nodeCount: number;
+  };
+  classification?: string;
+  iteration?: number;
+  noChangeCount?: number;
 }
 
 export async function orchestrate(input: CloudAgentInput) {
-  const { sanitizedScreenshot, sanitizedAT, sessionId, userGoal } = input;
+  const { sanitizedScreenshot, sanitizedAT, sessionId, userGoal, atDiff, classification, iteration, noChangeCount } = input;
 
   // Retrieve history for context
   const history = sessionManager.getHistory(sessionId);
@@ -41,6 +56,10 @@ export async function orchestrate(input: CloudAgentInput) {
       userGoal,
       sessionId,
       historyLength: history.length,
+      atDiff,
+      classification,
+      iteration,
+      noChangeCount,
     });
 
     // Persist successful turn

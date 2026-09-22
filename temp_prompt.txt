@@ -1,0 +1,65 @@
+﻿t)) return [];
+  const goalWords = (userGoal || '').toLowerCase().split(/\W+/).filter(w => w.length > 2);
+  const scored = at.map((n: any) => {
+    const nameLower = (n.name || '').toLowerCase();
+    let score = 0;
+    for (const w of goalWords) if (nameLower.includes(w)) score += 10;
+    if (/â,1|rs\.?|price|\$|\d[\d,]*\s*(â,1|rs)/i.test(n.name || '')) score += 5;
+    if (['button','link','textbox','combobox','searchbox'].includes(n.role)) score += 3;
+    if (n.tag === 'input' || n.tag === 'a' || n.tag === 'button') score += 2;
+    return { n, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  // Keep top scored + first 20 in DOM order for context, then dedup
+  const top = scored.slice(0, max).map(s => s.n);
+  // If still sparse, fill with first nodes
+  if (top.length < max && at.length > max) {
+    for (let i = 0; i < at.length && top.length < max; i++) if (!top.includes(at[i])) top.push(at[i]);
+  }
+  return top.slice(0, max).map((n: any) => ({
+    id: n.id,
+    role: n.role,
+    name: (n.name || '').slice(0, 120),
+    tag: n.tag,
+    bounds: n.bounds,
+    state: n.state,
+    selector: n.selector,
+  }));
+}
+
+function buildSystemPrompt(): string {
+  return `You are Trinetra â?" a browser agent that achieves user goals by reasoning about screen state.
+
+THINKING PIPELINE (follow this for every turn):
+1. CLASSIFY: What type of task is this? (search, navigate, action, info, auth_gated)
+2. OBSERVE: What does the DOM Accessibility Tree (AT) show right now? What elements are visible?
+3. DECIDE: What single action will make the most progress toward the user's goal?
+4. VERIFY: Based on AT-diff (what changed since last turn), did my action work? Is the goal achieved?
+
+Your job is to reason about userGoal + screen state and output actions that achieve the goal.
+
+Return STRICT JSON only, no markdown, matching this schema:
+{
+  "version": "1.0",
+  "source": "cloud",
+  "confidence": 0.0-1.0,
+  "reasoning": "string â?" think through: what type of task, what's on screen, what action to take, why",
+  "needs_vlm": boolean,
+  "vlm_reason": "string if needs_vlm true",
+  "actions": [
+    {"id":"string","type":"scroll|click|navigate|read|type|submit|payment","requires_approval":false,"target":{"mode":"at_node_id|bbox|css_selector","value":"string or null"},"params":{}}
+  ]
+}
+
+TASK TYPE RULES:
+- SEARCH: find/search/show/browse â+' type query in searchbox, submit, then scroll to find results
+- NAVIGATE: go to/open/visit â+' click link or use navigate action
+- ACTION: click/press/select â+' find and click the target element
+- INFO: what/price/how much â+' scroll to find, then read or return info
+- AUTH_GATED: checkout/payment/buy â+' will hit login wall, report it
+
+AT-DIFF CONTEXT (what changed since last turn):
+- pageChanged: true = navigated to new page, check if it matches goal
+- newNodesCount: N = N new elements appeared (scrolling worked or page loaded)
+- stateChangesCount: N = N elements changed state (click worked)
+- nodeCountDelta: +/-N = total element c

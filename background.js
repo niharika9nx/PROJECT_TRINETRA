@@ -23,13 +23,25 @@ function isValidScreenshotDataUrl(dataUrl) {
   return typeof dataUrl === 'string' && /^data:image\/(png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/.test(dataUrl);
 }
 
+const CONTENT_SCRIPT_BUNDLE = [
+  'lib/providers/model_provider_interface.js',
+  'lib/providers/stub_provider.js',
+  'lib/local_reasoning.js',
+  'lib/workflow_loop.js',
+  'content_script.js'
+];
+
 // --- Icon click → toggle content script panel ---
 chrome.action.onClicked.addListener((tab) => {
   if (!tab || !tab.id) return;
+  // chrome://, edge://, extension pages cannot be injected
+  if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
+    return;
+  }
   chrome.tabs.sendMessage(tab.id, { type: 'TRINETRA_TOGGLE_PANEL' }).catch(() => {
-    chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] }).then(() => {
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CONTENT_SCRIPT_BUNDLE }).then(() => {
       setTimeout(() => chrome.tabs.sendMessage(tab.id, { type: 'TRINETRA_TOGGLE_PANEL' }), 300);
-    });
+    }).catch(() => {});
   });
 });
 
@@ -59,7 +71,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const tab = tabs[0];
       // chrome:// and extension pages cannot be injected — give clear message
       if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
-        sendResponse({ success: false, error: `Cannot run on ${tab.url.split(':')[0]}:// pages — open a https:// e-commerce page` });
+        sendResponse({ success: false, error: `Cannot run Trinetra on ${tab.url.split(':')[0]}:// pages — this is the Chrome New Tab page. Open a https:// e-commerce website instead.` });
         return;
       }
       const trySend = () => new Promise((resolve) => {
@@ -70,9 +82,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       let res = await trySend();
       if (res && res._lastError && res._lastError.includes('Receiving end does not exist')) {
-        console.warn('[Trinetra] AT no receiver, injecting content_script.js', tab.id);
+        console.warn('[Trinetra] AT no receiver, injecting bundle', tab.id);
         try {
-          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] });
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CONTENT_SCRIPT_BUNDLE });
           await new Promise(r => setTimeout(r, 400));
           res = await trySend();
           if (res && res._lastError) {
@@ -126,16 +138,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       const tryExec = () => new Promise((resolve) => {
-        chrome.tabs.sendMessage(tab.id, { type: 'TRINETRA_EXECUTE_PLAN', plan: message.plan }, (res) => {
+        chrome.tabs.sendMessage(tab.id, { type: 'TRINETRA_EXECUTE_PLAN', plan: message.plan, at: message.at || [] }, (res) => {
           if (chrome.runtime.lastError) resolve({ _lastError: chrome.runtime.lastError.message });
           else resolve(res);
         });
       });
       let res = await tryExec();
       if (res && res._lastError && res._lastError.includes('Receiving end does not exist')) {
-        console.warn('[Trinetra] Execute no receiver, injecting', tab.id);
+        console.warn('[Trinetra] Execute no receiver, injecting bundle', tab.id);
         try {
-          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content_script.js'] });
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: CONTENT_SCRIPT_BUNDLE });
           await new Promise(r => setTimeout(r, 400));
           res = await tryExec();
           if (res && res._lastError) {
@@ -186,6 +198,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || !tabs[0]) {
         sendResponse({ success: false, error: 'No active tab to reload' });
+        return;
+      }
+      if (tabs[0].url && (tabs[0].url.startsWith('chrome://') || tabs[0].url.startsWith('chrome-extension://'))) {
+        sendResponse({ success: false, error: 'Cannot reload chrome:// pages' });
         return;
       }
       chrome.tabs.reload(tabs[0].id, () => {

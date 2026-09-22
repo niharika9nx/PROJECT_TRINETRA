@@ -85,8 +85,8 @@ document.addEventListener('DOMContentLoaded', () => {
       return null;
     } catch (e) { return null; }
   }
-  async function executePlanFn({ actions }) {
-    const res = await bgSend({ type: 'TRINETRA_EXECUTE_PLAN_BG', plan: { actions } });
+  async function executePlanFn({ actions, plan, at }) {
+    const res = await bgSend({ type: 'TRINETRA_EXECUTE_PLAN_BG', plan: { actions: actions || plan || [] }, at: at || [] });
     if (!res || !res.success) throw new Error(res?.error || 'execute failed');
     return res.result;
   }
@@ -610,7 +610,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sanitizeFn,
         serverUrl: 'http://localhost:3001/api/agent/act',
         onStep,
-        maxIterations: 6,
+        maxIterations: 10,
         threshold: 2,
         reloadPageFn: async () => {
           try { await bgSend({ type: 'TRINETRA_RELOAD_TAB' }); } catch (e) {}
@@ -622,7 +622,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (result.success) {
         setAgentState('completed');
         if (currentCloudState === 'cloud') setAgentState('completed', 'cloud-result');
-        finalText = `Task completed after ${result.iteration} iteration${result.iteration > 1 ? 's' : ''}.\n\n${result.reason}`;
+        const lastReasoning = result.cloudResult?.explanation ||
+                              result.cloudResult?.reasoning ||
+                              result.history?.slice(-1)[0]?.reasoning?.explanation ||
+                              result.history?.slice(-1)[0]?.reasoning?.reasoning ||
+                              '';
+        finalText = `Task completed after ${result.iteration} iteration${result.iteration > 1 ? 's' : ''}.\n\n` +
+                    (lastReasoning ? `${lastReasoning}\n\n` : '') +
+                    `Status: ${result.reason}`;
         if (result.history && result.history.some(h => h.reasoning?.needs_vlm)) finalText += '\n\n[Note] VLM_REQUIRED was flagged on some steps.';
       } else {
         setAgentState('error');
