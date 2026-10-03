@@ -38,3 +38,11 @@ opencode/
 # Temp
 tmp/
 temp/
+
+# Scratch / debug artifacts — never commit (past API key leak)
+scratch/
+server/server_log.txt
+server/server_err.txt
+temp_prompt.txt
+test_cmd.txt
+test_write.txt

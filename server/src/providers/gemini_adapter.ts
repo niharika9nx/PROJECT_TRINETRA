@@ -1,24 +1,28 @@
-// Trinetra — Gemini Adapter (Phase 10, API-key cloud)
-// Calls Google Gemini 1.5 Flash via REST. Keeps same LocalModelOutput contract as local_model_adapter.ts
-// Env: GEMINI_API_KEY (required), GEMINI_MODEL (default gemini-1.5-flash), GEMINI_TIMEOUT_MS (default 20000)
+// Trinetra — Gemini Adapter (cloud brain)
+// Calls Google Gemini via REST. Keeps same LocalModelOutput contract as local_model_adapter.ts
+// Env: GEMINI_API_KEY (required), GEMINI_MODEL, GEMINI_FALLBACK_MODELS, GEMINI_TIMEOUT_MS
 // Adapter is server-side only — key never leaves server, sanitized payload only.
 
 export interface GeminiInput {
-  sanitizedScreenshot?: string;
+  sanitizedScreenshot?: string | null;
   sanitizedAT?: any[];
   userGoal?: string;
   sessionId?: string;
   historyLength?: number;
+  recentActions?: Array<{ reasoning?: string; action?: any }>;
   atDiff?: {
     nodeCountDelta: number;
     newNodesCount: number;
     stateChangesCount: number;
     pageChanged: boolean;
     nodeCount: number;
+    urlChanged?: boolean;
   };
   classification?: string;
   iteration?: number;
   noChangeCount?: number;
+  executeFailures?: number;
+  noTransitionCount?: number;
 }
 
 export interface GeminiOutput {
@@ -38,23 +42,35 @@ export interface GeminiOutput {
   vlm_reason?: string;
 }
 
+// Action types that must never execute without explicit human approval.
+// Mirrors RESTRICTED_ACTIONS in lib/action_executor.js and content_script.js.
+const RESTRICTED_ACTIONS = new Set(['type', 'fill', 'submit', 'confirm', 'payment', 'payments', 'sensitive_ops']);
+
 function generateId(): string {
   return `gemini-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-function getConfig() {
+export function isGeminiConfigured(): boolean {
+  const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  if (!key || key === 'PASTE_YOUR_KEY_HERE') return false;
+  if (process.env.CLOUD_PROVIDER === 'local') return false;
+  return true;
+}
+
+export function getConfig() {
   const apiKey = process.env.GEMINI_API_KEY || '';
   // Allow GOOGLE_API_KEY alias per .env.example history
   const fallbackKey = process.env.GOOGLE_API_KEY || '';
   const key = apiKey || fallbackKey;
-  const model = process.env.GEMINI_MODEL || 'gemini-3-flash-preview';
+  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
   const timeoutMs = process.env.GEMINI_TIMEOUT_MS ? Number(process.env.GEMINI_TIMEOUT_MS) : 15000;
-  const fallbackModelsRaw = process.env.GEMINI_FALLBACK_MODELS || 'gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview';
+  const fallbackModelsRaw = process.env.GEMINI_FALLBACK_MODELS || 'gemini-flash-lite-latest,gemini-3-flash-preview';
   const fallbackModels = fallbackModelsRaw.split(',').map(s => s.trim()).filter(Boolean);
   return { key, model, timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 15000, fallbackModels };
 }
 
-function getModelChain(): string[] {
+// Single source of truth for the model chain — /health reports this, callGeminiModel walks it.
+export function getModelChain(): string[] {
   const { model, fallbackModels } = getConfig();
   const chain = [model, ...fallbackModels.filter(m => m !== model)];
   // Dedup
@@ -87,29 +103,26 @@ function truncateAT(at: any[], userGoal?: string, max = 80): any[] {
 
 // System prompt defining agent behavior and schema
 export function buildSystemPrompt(): string {
-  return `You are Trinetra — an intelligent autonomous web agent that achieves user goals by reasoning about live screen state from the DOM Accessibility Tree (AT).
+  return `You are Trinetra — an intelligent autonomous web agent that achieves user goals by reasoning about live screen state from the DOM Accessibility Tree (AT). You are NOT a keyword matcher: you read the full goal, observe the real AT, and plan concrete actions for THIS screen.
 
-THINKING PIPELINE (follow this for every turn):
-1. CLASSIFY: What type of task is this? (search, navigate, action, info, auth_gated)
-2. OBSERVE: What does the DOM Accessibility Tree (AT) show right now?
-   - Is there a search box on screen? (e.g. role="searchbox", tag="input", name="Search Amazon", id="twotabsearchtextbox")
-   - Are search results with product titles and prices displayed?
-   - What elements are visible?
-3. DECIDE: What concrete action(s) will make progress toward the user's goal?
-   - If on an e-commerce home/landing page and user wants an item:
-     -> Action 1: "type" into searchbox with the concise search keywords (e.g. "gojo satoru keychain"). Set requires_approval: false.
-     -> Action 2: "submit" the searchbox or click the search submit button. Set requires_approval: false.
-   - If on search results page:
-     -> Examine product titles and prices (e.g. "₹299", "₹450"). Check if any match the user's constraints (e.g. under 500).
-     -> Click the best matching product, or scroll down if more results need to be loaded.
-4. VERIFY: Based on AT-diff (what changed since last turn), did my action work? Is the goal achieved?
+THINKING PIPELINE (every turn):
+1. UNDERSTAND the full userGoal: intent + all constraints (budget e.g. "under 1 lakh", brand, color, page name, filters). Constraints are part of the goal — do not discard them.
+2. OBSERVE the AT: what elements are actually present? Search box? Product results with prices? Header links (Cart, Orders, Account)? Forms?
+3. DECIDE one or more actions that make real progress on THIS screen:
+   - Search goals: type a query that captures product + meaningful qualifiers (e.g. "laptop under 1 lakh"). On results pages, use constraints to pick which product to open (match prices to budget).
+   - "Open the best/cheapest X" goals: the job is to land on ONE product page, not a results list. On a results page, read each card's title, price and rating from the AT, apply the budget, and click the single best-matching product link. Do not return a scroll or read — click the product.
+   - Navigation goals ("open my cart", "go to orders", "visit settings"): find a link/button in the AT whose name matches the target (e.g. name "Cart", role link) and click its at_node_id; or emit navigate with a path if the AT reveals one.
+   - Order goals ("buy it", "place the order"): add to cart, then proceed to checkout. The FINAL commit (Place order / Pay now / Confirm order) is the user's decision, not yours — see the rules below.
+   - Page interaction: click the visible control that advances the goal.
+   - If unsure what is on screen: emit a single read action to observe more — never invent selectors.
+4. VERIFY using AT-diff: did the last action change the page/state? Adjust next plan accordingly.
 
 Return STRICT JSON only, matching this schema:
 {
   "version": "1.0",
   "source": "cloud",
   "confidence": 0.0-1.0,
-  "reasoning": "string — clear reasoning: what was seen on screen, what action is taken, and why",
+  "reasoning": "string — what you see in the AT, what you will do, and why (mention constraints if present)",
   "needs_vlm": boolean,
   "vlm_reason": "string if needs_vlm true",
   "actions": [
@@ -124,10 +137,13 @@ Return STRICT JSON only, matching this schema:
 }
 
 CRITICAL RULES:
-- For search queries on public search boxes: set requires_approval: false so the search executes smoothly without interruption.
-- For sensitive operations ONLY (passwords, credit cards, payment checkout, personal addresses): set requires_approval: true.
-- Extract concise, effective search keywords from userGoal (e.g., from "fetch me a good gojo satoru keychain under 500", search for "gojo satoru keychain").
-- If the AT contains a searchbox node (role="searchbox", id="twotabsearchtextbox", or name containing "search"): target it using mode "at_node_id" with its id, or mode "semantic" with value "search".
+- Prefer mode "at_node_id" with an id you can see in the AT; use "semantic" only when no AT id fits.
+- Keep goal constraints in type text when searching; apply them when choosing products on results.
+- Navigation: prefer clicking an existing AT link/button over guessing URLs.
+- For public search boxes / non-sensitive actions: requires_approval false.
+- For sensitive operations ONLY (passwords, credit cards, payment checkout, personal addresses): requires_approval true.
+- PURCHASES: adding to cart and going to checkout are fine. NEVER type into a card, CVV, expiry, OTP or account-number field — not even if the page asks for them. Emit a read action and say in your reasoning that the user must enter payment details themselves.
+- PURCHASES: never click the final commit (Place order / Pay now / Confirm order / Buy it now) as part of a multi-action plan. Emit it as the ONLY action in the plan, so the user can confirm the amount deliberately. The client re-checks and gates it regardless.
 - Never use javascript: URLs.
 - Always output valid JSON only.`;
 }
@@ -156,18 +172,23 @@ export function buildUserPrompt(input: GeminiInput): string {
 
   let classContext = '';
   if (input.classification) {
-    classContext = `\nTask classification: ${input.classification}`;
+    classContext = `\nTask classification hint: ${input.classification} (hint only — verify against AT; override if AT shows otherwise)`;
   }
   if (input.iteration) {
     classContext += `\nIteration: ${input.iteration}`;
   }
 
+  let recentContext = '';
+  if (Array.isArray(input.recentActions) && input.recentActions.length > 0) {
+    recentContext = `\nRecent attempts (do not blindly repeat; adapt): ${JSON.stringify(input.recentActions.slice(-3))}`;
+  }
+
   return `UserGoal: ${input.userGoal || '(none)'}
-Session: ${input.sessionId || 'unknown'} historyTurns: ${input.historyLength ?? 0}${classContext}${diffContext}
+Session: ${input.sessionId || 'unknown'} historyTurns: ${input.historyLength ?? 0}${classContext}${diffContext}${recentContext}
 Sanitized AT summary: ${atSummary}
 Full truncated AT JSON:
 ${JSON.stringify(atTrunc, null, 2)}
-Instructions: Think through CLASSIFY → OBSERVE → DECIDE → VERIFY. Return Action Plan JSON per system prompt. No extra text.`;
+Instructions: Think through UNDERSTAND -> OBSERVE -> DECIDE -> VERIFY. Return Action Plan JSON per system prompt. No extra text.`;
 }
 
 function tryParseJson(text: string): any | null {
@@ -225,11 +246,14 @@ function normalizeOutput(parsed: any, fallbackAt: any[]): GeminiOutput {
       return { id: a.id || generateId(), type: 'read', requires_approval: false, target: null, params: {} };
     }
     const typeStr = String(a.type || 'read').toLowerCase();
-    const isSearchAction = (target && typeof target.value === 'string' && /search/i.test(target.value)) ||
-                           (params && typeof params.text === 'string' && !/password|card|cvv|otp/i.test(params.text));
-    const isSensitive = ['payment', 'payments', 'sensitive_ops'].includes(typeStr) ||
+    // Approval policy: restricted action types always gate. An explicit
+    // requires_approval:true is honoured and never downgraded. The previous
+    // heuristic treated any `type` whose text lacked /password|card|cvv|otp/i
+    // as a "search action" and stripped its approval flag — that let addresses,
+    // phone numbers and usernames through with no prompt.
+    const isSensitive = RESTRICTED_ACTIONS.has(typeStr) ||
                         (params && /password|credit|card|cvv|otp|pin|ssn/i.test(JSON.stringify(params)));
-    const reqApproval = a.requires_approval === true ? !isSearchAction : isSensitive;
+    const reqApproval = a.requires_approval === true ? true : isSensitive;
 
     return {
       id: a.id || generateId(),
@@ -276,14 +300,17 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt(input);
   const chain = getModelChain();
-  console.log(`[Gemini] Chain: ${chain.join(' → ')}`);
+  console.log(`[Gemini] Chain: ${chain.join(' -> ')}`);
 
   // Try each model in chain on 429/503/timeout — 3-4 backups
   let lastError: any = null;
   for (let mi = 0; mi < chain.length; mi++) {
     const model = chain[mi];
     const isLast = mi === chain.length - 1;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+    // Key travels in a header, not the query string — query strings land in
+    // proxy and CDN access logs.
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+    const authHeaders = { 'Content-Type': 'application/json', 'x-goog-api-key': key };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -305,7 +332,7 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
       try {
         res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders,
           body: JSON.stringify(attemptBody),
           signal: controller.signal,
         });
@@ -324,11 +351,15 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
           try {
             res = await fetch(url, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: authHeaders,
               body: JSON.stringify(attemptBody),
               signal: controller.signal,
             });
-          } catch {}
+          } catch (retryErr: any) {
+            // A network error on the retry is a real failure — surface it
+            // instead of falling through to a misleading "503 unavailable".
+            throw new Error(`Gemini 503 retry failed (${model}): ${retryErr.message}`);
+          }
           if (!res.ok) {
             const retryText = await res.text().catch(() => '');
             throw new Error(`Gemini 503 unavailable (${model}): ${retryText.slice(0, 400)}`);
@@ -347,7 +378,13 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
       clearTimeout(timeout);
       lastError = e;
       const msg = e.message || '';
-      const isRateOrUnavailable = msg.includes('429') || msg.includes('503') || msg.includes('timeout');
+      // Timeout/abort: fail fast — do NOT retry across model chain (would multiply 8s -> 24s)
+      if (msg.includes('timeout') || msg.includes('AbortError')) {
+        const skipped = chain.length - mi - 1;
+        console.warn(`[Gemini] ${model} timeout — failing fast (no model-chain retry). ${skipped} backup model(s) skipped: ${chain.slice(mi + 1).join(', ') || 'none'}`);
+        throw e;
+      }
+      const isRateOrUnavailable = msg.includes('429') || msg.includes('503');
       if (isRateOrUnavailable && !isLast) {
         console.warn(`[Gemini] ${model} failed (${msg.slice(0,120)}), trying next backup: ${chain[mi+1]}`);
         // small backoff before next model
@@ -453,6 +490,3 @@ export async function callGeminiModel(input: GeminiInput): Promise<GeminiOutput>
   // All Gemini models failed (429/503/timeout) — throw so cloud_agent.ts can fall back to smart local_model_adapter
   throw new Error(`All Gemini models failed (429/503/timeout). Last error: ${lastError?.message?.slice(0,300)}`);
 }
-
-// Compat alias so cloud_agent can import either name
-export const callLocalModel = callGeminiModel;

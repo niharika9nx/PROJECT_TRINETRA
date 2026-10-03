@@ -17,7 +17,11 @@
       "js": [
         "lib/providers/model_provider_interface.js",
         "lib/providers/stub_provider.js",
+        "lib/pii_detector.js",
+        "lib/pii_validator.js",
+        "lib/sanitization_engine.js",
         "lib/local_reasoning.js",
+        "lib/products.js",
         "lib/workflow_loop.js",
         "content_script.js"
       ],

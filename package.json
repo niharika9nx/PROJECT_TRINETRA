@@ -1,0 +1,10 @@
+{
+  "name": "trinetra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trinetra — privacy-preserving AI web agent (Chrome MV3 extension)",
+  "scripts": {
+    "test": "node tests/run_all.js",
+    "test:offline": "node tests/run_all.js"
+  }
+}

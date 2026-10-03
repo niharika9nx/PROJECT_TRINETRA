@@ -233,8 +233,212 @@ ai-web-agent-extension/  (repo root = C:\Users\nihar\PROJECT_TRINETRA)
 |------|--------|
 | 2026-09-05 | Initial template created |
 | 2026-09-05 | Full SIH 2026 plan written; locked to Express+TS, local-cloud, Chrome-first; phased DoDs |
+| 2026-09-29 | Correctness + security pass (see §12) |
+
+## 12. Correctness & Security Pass (2026-09-29)
+
+Fixes applied after a codebase review. All changes are covered by `npm test`.
+
+**Security**
+- A live Gemini API key was committed in `scratch/test_gemma.js`. File deleted,
+  `scratch/` gitignored. **The key must be rotated** — history rewriting was not
+  performed as it rewrites every commit hash.
+- Server: CORS wildcard + bind-all replaced with an origin allow-list
+  (`chrome-extension://` + loopback) and a `127.0.0.1` bind. Optional
+  `TRINETRA_SERVER_TOKEN` adds a shared-secret header check on `/api/*`.
+- API key moved out of the Gemini URL query string into the `x-goog-api-key` header.
+- Sanitization now actually runs: `pii_detector.js`, `pii_validator.js` and
+  `sanitization_engine.js` were implemented but never loaded, and both UIs
+  supplied a passthrough `sanitizeFn` that shipped the **raw** accessibility tree
+  to the cloud. Fixed in the manifest bundle, `CONTENT_SCRIPT_BUNDLE`, and the
+  loop now forwards the Sanitization Report to the server.
+- Sanitization **fails closed**: if the pipeline is missing or throws, the AT is
+  withheld rather than sent raw.
+- Fixed two leaks inside the sanitizer itself: masked nodes retained the raw
+  value in `originalName`, and the phone regex missed 5-digit subscriber formats
+  such as `+91 98765 43210`.
+- Stub VLM detections are marked `grounded: false` so fixture coordinates are
+  never painted onto real screenshots, and the report no longer claims a
+  redaction that did not happen.
+- Navigation hardened: absolute `http(s)` only (blocks `//evil.com`), and the
+  content-script fallback only navigates same-origin when the background is
+  unavailable.
+- Removed the Google Fonts `@import` — it fired a request to Google from every
+  page the agent touched.
+
+**Approval gate**
+- `type`/`fill`/`submit`/`confirm`/`payment` were effectively ungated: an
+  `isSearchAction` heuristic treated any `type` whose text did not match
+  `/password|card|cvv|otp/i` as a search action and stripped its
+  `requires_approval: true`. Addresses, phone numbers and usernames ran with no
+  prompt. The identical flaw existed in three places
+  (`content_script.js`, `lib/action_executor.js`, `gemini_adapter.ts`); all three
+  now use the `RESTRICTED_ACTIONS` set and never downgrade an explicit flag.
+- Added a 120s approval-modal timeout (an unattended modal previously wedged the
+  loop forever) and fail-closed denial when no handler exists.
+- The local rule-based adapter emitted `requires_approval: false` on every
+  action, including `type`+`submit` against login forms.
+
+**Cloud path**
+- `sanitizedScreenshot` was optional but not nullable, so the extension's
+  `getScreenshot: null` produced a 400 on **every** escalation (9 such 400s are
+  recorded in the old `server/server_log.txt`). Fixed.
+- `executeFailures`, `noTransitionCount` and `atDiff.urlChanged` were sent by the
+  client but silently stripped by Zod, so the model never saw the signal needed
+  to escape a failing loop. Now part of the schema.
+- A Gemini failure was silently downgraded to the local stub and still returned
+  `success: true`; the stub also labelled itself `source: 'cloud'`. Downgrades are
+  now flagged `degraded: true` / `source: 'local-stub'` and surfaced in the panel.
+- A timeout skipped the entire backup model chain silently; the skipped models
+  are now logged.
+- `/health` advertised a different model chain than the one actually used. It now
+  imports `getModelChain()` from the adapter as the single source of truth.
+- `RegExp` injection in the local adapter (unescaped user-derived word) fixed;
+  AT nodes with missing fields no longer throw.
+
+**Contracts & consistency**
+- Confidence normalized to a 0–1 scale everywhere (interface, stub, threshold,
+  UI). Previously the interface required 0–1 while the stub returned 1–5 and the
+  UI multiplied by 100, so a confidence of 3 rendered as "300%".
+- `target.mode` in the cloud prompt offers `semantic`, which is not in the
+  plan.md contract; the executor accepts both. Left as-is, flagged for Phase 12.
+- Removed the dead `popup.html` / `popup.js` (≈700 lines). They were unreachable
+  because the manifest sets `action.default_title` and not `default_popup`, so
+  `chrome.action.onClicked` opens the in-page panel. `plan.md` Phase 0 required a
+  popup; this reverses that decision in favour of the panel, which is the UI that
+  actually runs.
+
+**Agent reliability pass (2026-09-29)**
+Reported symptom: the first 2–3 iterations of every run fail with "action failed",
+"page did not navigate" and "no screen change", and the run never shows a clear
+success state. Four root causes, all confirmed in code:
+
+1. **Stale targets.** AT node ids were positional (`node_0`, `node_1`, … by DOM
+   order). A plan is produced from an AT snapshot but executed after
+   sanitization plus a model call — seconds later — by which time a dynamic page
+   has re-rendered and `node_137` refers to a different element. Ids are now
+   derived from element content (FNV-1a over tag + selector + normalized
+   accessible name, plus an occurrence counter for identical siblings), so the
+   same logical element stays addressable across a re-render. Bounds are excluded
+   so scrolling does not invalidate an id.
+2. **Unreachable controls.** `maxNodes: 2000` stopped the extraction loop, so
+   elements past that point never received a `data-trinetra-id` and could never
+   be targeted — on a listing page that is exactly where filters and results
+   live. Actionable elements are now collected first and are never dropped in
+   favour of decorative nodes.
+3. **A slow page was reported as a dead page.** The post-transition wait was a
+   fixed 1800ms, and the inter-iteration delay 100ms. Amazon changes the URL
+   quickly but renders for seconds, so a normal load was logged as
+   "page did not navigate", which bumped `failureCount` and fed the model a false
+   "your last attempts failed" signal — the cascade that turned one slow load
+   into three broken iterations. Replaced with `waitForPageSettled()`: wait for
+   the URL change (8s cap), then wait for the DOM to stop structurally mutating
+   (MutationObserver, 350ms quiet, 4s cap).
+4. **Success was inferred by regexing the model's prose.** `/error|failed|
+   couldn't|unable|stopped/i` was matched against text that embeds the model
+   reasoning, so a successful run whose reasoning said "the previous submit
+   failed" rendered as **Task failed**. Success is now passed explicitly.
+
+Also fixed:
+- The panel set `completed` inside the `try` and reset to `ready` in the
+  `finally` on the same tick, so success was never visible. Terminal
+  `completed`/`error` states are now sticky until the next run.
+- "Stuck" is now attributed honestly: the loop distinguishes "the agent could
+  not find or use the target" from "the page is not responding", and no longer
+  blames the page when its own actions failed. A grace period stops the counter
+  arming before the agent has executed anything, and a successful page
+  transition resets it.
+- Approval is now requested **once per plan** rather than once per action. Every
+  restricted action is listed in the single prompt; gate strength is unchanged.
+- A successful run shows a result banner (iterations, actions, cloud/local,
+  whether it degraded) plus three contextual follow-up chips built from the
+  task classification and the product noun in the goal.
+- User denial is now a distinct `execute_denied` step and no longer feeds the
+  escalation signals as a failure.
+
+**Product selection & ordering (2026-09-29)**
+Reported gap: "open best laptop" never selected a product, and there was no
+order handling.
+
+- `classifyQuery` matched `/open/` before anything else, so *every* "open X" goal
+  became `navigate` and no product was ever chosen. New `select_product` intent
+  keys off a product qualifier (best/top/cheapest/under/rating) rather than the
+  leading verb, with a true-possessive guard so "open my cart" still navigates.
+  `order` replaces the ambiguous `auth_gated` for purchase intent
+  (`auth_gated` is kept as a working alias).
+- New `lib/products.js`: groups the flat accessibility tree into product cards,
+  parses price (with lakh/crore/L units) and rating, and scores candidates
+  against the goal's budget and preference. Deliberately refuses to read a bare
+  number as a price — "4.2 out of 5 stars" parsing as ₹4.20 was a real bug that
+  defeated the budget filter.
+- Actionable elements beyond the old 2000-node cap are now extracted, so results
+  deep in a listing page are reachable.
+- Order flow: add to cart and checkout proceed automatically; the final commit is
+  pulled out of the plan and only runs after an amount-bearing confirmation. A
+  commit whose total cannot be read from the page is refused outright rather
+  than gated. Reaching checkout is not treated as success — only an order
+  confirmation is.
+- **Purchase safety is enforced in the loop, not trusted to the planner.** Card
+  numbers, CVVs, expiry, OTP and account numbers are never typed; the action is
+  dropped before it reaches the page and reported to the user. The guard resolves
+  `at_node_id` targets back to their label, because the planner targets by id and
+  the button's text lives in the AT — without that lookup "Place your order"
+  would have waved straight through. `confirmPurchaseFn` fails closed: absent or
+  negative means no order.
+- The Gemini system prompt now describes both intents and restates the purchase
+  boundary, so the model is told the rule it is also checked against.
+
+**Tests**
+- Added `npm test` (root `package.json`) and `tests/test_approval.js` +
+  `tests/test_sanitize.js`. Note the root `package.json` deliberately omits
+  `"type": "module"` — the suite is CommonJS.
+- `test_cloud_phase.js` now reads `PORT`, skips cleanly when the server is down,
+  and asserts on the typed text plus its approval flag instead of soft-passing.
+- Removed two vacuous assertions, and fixed two racing unguarded async IIFEs in
+  `test_observe.js`.
+- Confidence assertions ported from the 1–5 scale to 0–1.
+
+**Content-script bundle load (follow-up regression)**
+- Adding `pii_validator.js` / `pii_detector.js` to the manifest bundle exposed a
+  load-breaking bug that the whole suite had stayed green on. Chrome injects
+  every `content_scripts[].js` entry as a classic script into **one shared
+  realm**, where a duplicate top-level `let` is a SyntaxError and the file
+  silently never executes. `lib/pii_validator.js` and `lib/local_reasoning.js`
+  both declared `let llmProvider`, so wiring up the sanitization pipeline
+  silently killed `local_reasoning.js` — `window.TrinetraLocalReasoning` was
+  never created and the agent fell back to a reduced stub path. Node's
+  `require()` gives per-file module scope and cannot see this class of bug.
+- Fixes: renamed the duplicate binding to `piiLlmProvider`; wrapped all 12
+  `lib/*.js` files in an IIFE so no top-level `let`/`const`/`class` can reach the
+  shared realm; and decoupled the two `DEFAULT_THRESHOLD` globals, which had
+  only ever worked because `workflow_loop.js` happened to load second.
+- Added `tests/test_bundle_load.js`, which reproduces the browser's load model
+  (manifest order, single `vm` context, `window === self === globalThis`, no
+  `require`/`module`, minimal `chrome` stub) and asserts zero load errors, that
+  all 8 required globals exist, that no module-private state leaked, and that
+  the sanitization pipeline strips PII **in the content-script world** rather
+  than only under `require()`. It also pins `manifest.json` and
+  `CONTENT_SCRIPT_BUNDLE` to the same file list.
+- Suite is now 11/11 with the server up and 11/11 with it down.
+
+**Known gaps (not addressed here)**
+- `lib/at_extractor.js` and `lib/action_executor.js` are duplicated inline in
+  `content_script.js` and have diverged; the lib copies are only exercised by
+  tests, so the tests partly cover code that does not run in the browser. The
+  approval-gate test asserts both copies agree to limit the risk.
+- The panel and approval modal are injected into the light DOM with no shadow
+  root, so page CSS can affect them and a hostile page can read the conversation.
+- Screenshot capture is wired but unused (`getScreenshot: null`); the
+  `sanitizedScreenshot` field is accepted by the schema and never read by the
+  adapter.
+- `session_manager.ts` has no TTL or size cap, and `sessionId` is client-supplied.
 
 ## 11. Next Actions
 
-1. Execute Phase 0 skeleton now.
-2. After each phase, append verification notes here before proceeding.
+1. **Rotate the Gemini API key** and decide whether to rewrite git history.
+2. Phase 12 — reference demo task.
+3. Phase 13 — real client-side model; this is also what makes grounded screenshot
+   redaction real.
+4. Consider deduplicating `lib/` against the `content_script.js` inlines and
+   moving the panel into a shadow root.
+

@@ -23,10 +23,15 @@ function isValidScreenshotDataUrl(dataUrl) {
   return typeof dataUrl === 'string' && /^data:image\/(png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/.test(dataUrl);
 }
 
+// Must stay in sync with the manifest.json content_scripts list.
 const CONTENT_SCRIPT_BUNDLE = [
   'lib/providers/model_provider_interface.js',
   'lib/providers/stub_provider.js',
+  'lib/pii_detector.js',
+  'lib/pii_validator.js',
+  'lib/sanitization_engine.js',
   'lib/local_reasoning.js',
+  'lib/products.js',
   'lib/workflow_loop.js',
   'content_script.js'
 ];
@@ -49,7 +54,23 @@ chrome.action.onClicked.addListener((tab) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
 
-  // Phase 3: screenshot capture requested by popup/content
+  // Resolve the tab to act on. Prefer the sender's own tab so a stale panel
+  // cannot steer whichever tab the user happens to have focused; fall back to
+  // the active tab for messages from the extension's own pages.
+  const resolveTab = (callback) => {
+    if (sender && sender.tab && sender.tab.id) return callback(sender.tab);
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || !tabs[0]) return callback(null);
+      callback(tabs[0]);
+    });
+  };
+
+  const isRestrictedPage = (tab) => !!(tab && tab.url && (
+    tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') ||
+    tab.url.startsWith('edge://') || tab.url.startsWith('about:')
+  ));
+
+  // Phase 3: screenshot capture requested by panel/content
   if (message.type === 'TRINETRA_CAPTURE_SCREENSHOT') {
     captureScreenshot(message.options || {})
       .then((dataUrl) => {
@@ -63,14 +84,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Utility: extract AT via content script (Phase 2 bridge through background) — with auto-inject retry for new tabs/other e-commerce
   if (message.type === 'TRINETRA_REQUEST_AT') {
-    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-      if (!tabs || !tabs[0]) {
+    resolveTab(async (tab) => {
+      if (!tab) {
         sendResponse({ success: false, error: 'No active tab' });
         return;
       }
-      const tab = tabs[0];
       // chrome:// and extension pages cannot be injected — give clear message
-      if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://') || tab.url.startsWith('edge://') || tab.url.startsWith('about:'))) {
+      if (isRestrictedPage(tab)) {
         sendResponse({ success: false, error: `Cannot run Trinetra on ${tab.url.split(':')[0]}:// pages — this is the Chrome New Tab page. Open a https:// e-commerce website instead.` });
         return;
       }
@@ -127,13 +147,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Phase 11: execute plan via content script — with same auto-inject retry
   if (message.type === 'TRINETRA_EXECUTE_PLAN_BG') {
-    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-      if (!tabs || !tabs[0]) {
+    resolveTab(async (tab) => {
+      if (!tab) {
         sendResponse({ success: false, error: 'No active tab for execution' });
         return;
       }
-      const tab = tabs[0];
-      if (tab.url && (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://'))) {
+      if (isRestrictedPage(tab)) {
         sendResponse({ success: false, error: `Cannot execute on ${tab.url.split(':')[0]}:// pages` });
         return;
       }
@@ -170,16 +189,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Navigation via background (avoids CSP javascript: URL block in content script)
   if (message.type === 'TRINETRA_NAVIGATE') {
     const url = message.url;
-    if (!url || typeof url !== 'string' || !url.startsWith('http')) {
-      sendResponse({ success: false, error: 'Navigate requires http(s) URL — javascript: blocked by CSP' });
+    // Reject protocol-relative "//evil.com" as well as javascript:/data: —
+    // startsWith('http') alone would let the former through.
+    if (!url || typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      sendResponse({ success: false, error: 'Navigate requires an absolute http(s) URL — javascript:, data: and protocol-relative URLs are blocked' });
       return true;
     }
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (!tabs || !tabs[0]) {
+    resolveTab((tab) => {
+      if (!tab) {
         sendResponse({ success: false, error: 'No active tab for navigate' });
         return;
       }
-      chrome.tabs.update(tabs[0].id, { url }, () => {
+      if (isRestrictedPage(tab)) {
+        sendResponse({ success: false, error: `Cannot navigate ${tab.url.split(':')[0]}:// pages` });
+        return;
+      }
+      chrome.tabs.update(tab.id, { url }, () => {
         if (chrome.runtime.lastError) sendResponse({ success: false, error: chrome.runtime.lastError.message });
         else sendResponse({ success: true });
       });
@@ -187,24 +212,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Ping
-  if (message.type === 'TRINETRA_BG_PING') {
-    sendResponse({ success: true, message: 'Trinetra background ready', version: '0.1.0' });
-    return true;
-  }
-
   // Auto-reload tab after stalled iterations (get fresh AT)
   if (message.type === 'TRINETRA_RELOAD_TAB') {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (!tabs || !tabs[0]) {
+    resolveTab((tab) => {
+      if (!tab) {
         sendResponse({ success: false, error: 'No active tab to reload' });
         return;
       }
-      if (tabs[0].url && (tabs[0].url.startsWith('chrome://') || tabs[0].url.startsWith('chrome-extension://'))) {
-        sendResponse({ success: false, error: 'Cannot reload chrome:// pages' });
+      if (isRestrictedPage(tab)) {
+        sendResponse({ success: false, error: `Cannot reload ${tab.url.split(':')[0]}:// pages` });
         return;
       }
-      chrome.tabs.reload(tabs[0].id, () => {
+      chrome.tabs.reload(tab.id, () => {
         if (chrome.runtime.lastError) sendResponse({ success: false, error: chrome.runtime.lastError.message });
         else sendResponse({ success: true });
       });
@@ -213,4 +232,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-console.log('[Trinetra] background service worker loaded — screenshot + message router ready (Phase 3)');
+console.log('[Trinetra] background service worker loaded — screenshot + message router ready');
